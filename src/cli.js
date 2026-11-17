@@ -3,6 +3,7 @@ import {readFile,writeFile,rename,mkdir,open,unlink} from 'node:fs/promises';
 import {dirname,resolve} from 'node:path';
 import {ClickUp} from './api.js';
 import {sync} from './sync.js';
+import {loadEnvironment} from './env.js';
 const args=process.argv.slice(2);
 if(args.includes('--help')) {
   console.log('retainers [dry-run|validate|sync] [--task TASK_ID] [--apply]\nEnvironment: CLICKUP_WORKSPACE_ID, CLICKUP_REGISTRY_LIST_ID, CLICKUP_API_TOKEN, RETAINER_STATE_PATH\nsync requires --apply for writes; all other modes are read-only.');
@@ -10,6 +11,7 @@ if(args.includes('--help')) {
 }
 let lock;
 try {
+  loadEnvironment();
   const command=args[0] || 'dry-run';
   if(!['dry-run','validate','sync'].includes(command)) throw Error('Unknown command');
   const flags=args.slice(1); let taskId,apply=false;

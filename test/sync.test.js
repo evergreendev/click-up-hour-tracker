@@ -13,10 +13,10 @@ function fixture() {
   const run=(opts={})=>sync({api,workspace:'1',registry:'registry',state,dryRun:false,...opts});
   return {api,tasks,writes,comments,state,run,hours:v=>hours=v,broken:v=>broken=v,timeout:()=>timeout=true};
 }
-test('UWBH onboarding: allowance, mixed scope allowlist, dry run no writes/state',async()=>{
-  const f=fixture(); f.tasks[0]=task('uwbh',{'List allowlist':['20','21','22','23'].map(id=>`https://app.clickup.com/1/v/li/${id}`).join('\n')});
+test('UWBH onboarding: entire Folder and subfolders, dry run no writes/state',async()=>{
+  const f=fixture();
   f.hours(170);const [r]=await f.run({dryRun:true});
-  assert.deepEqual(r.lists.map(l=>l.name),['ALICE','Outreach','Marketing','Campaign']);
+  assert.deepEqual(r.lists.map(l=>l.name),['ALICE','Outreach','Marketing','Campaign','Unrelated']);
   assert.equal(r.used,170);assert.deepEqual(r.firstRunReached,[80]);assert.equal(r.proposedComment,null);assert.deepEqual(f.state,{});assert.equal(f.writes.length,0);
 });
 test('second client and renewal are registry data only',async()=>{
@@ -55,6 +55,19 @@ test('HTTP adapter handles registry/comments pagination and defaults to blocked 
  assert.equal((await api.registry('r')).length,1);assert.equal((await api.comments('x')).length,1);assert.equal(calls.at(-1).start_id,'c');
 });
 
+test('ClickUp Date fields use authorized user calendar date, then contract timezone boundaries',()=>{
+  // ClickUp returns 04:00 in the API user's zone. In Tokyo, Jan 1 is still Dec 31 UTC.
+  const t=task('dates',{'Contract start':String(Date.parse('2026-01-01T04:00:00+09:00')),'Contract end':String(Date.parse('2026-12-31T04:00:00+09:00')),'AdOrbit opening hours':20,'Cutover date':String(Date.parse('2026-07-01T04:00:00+09:00'))});
+  for(const f of t.custom_fields) if(['Contract start','Contract end','Cutover date'].includes(f.name)) {f.type='date';f.value_options={time:false};}
+  const c=contract(t,'1','Asia/Tokyo');
+  assert.equal(c.start,midnight('2026-01-01','America/Denver'));
+  assert.equal(c.end,midnight('2027-01-01','America/Denver'));
+  assert.equal(c.from,midnight('2026-07-01','America/Denver'));
+  assert.throws(()=>contract(t,'1'),/timezone required/);
+  t.custom_fields.find(f=>f.name==='Contract start').value_options.time=true;
+  assert.throws(()=>contract(t,'1','Asia/Tokyo'),/without a time/);
+});
+
 function monthlyFixture() {
  const f=fixture();
  f.tasks[0]=task('uwbh',{'Monthly budget hours':20});
@@ -86,4 +99,70 @@ test('monthly mode dry run, negative carryover, validation and migration',async(
 test('custom field adapter uses dedicated endpoint and write guard',async()=>{
  const api=new ClickUp('mock');await assert.rejects(api.setField('x','b',25),/disabled/);
  api.request=async(...args)=>args;assert.deepEqual(await api.setField('x','b',25),['task/x/field/b',{},'POST',{value:25}]);
+});
+
+test('monthly sync accepts ClickUp Date fields and preserves carryover calculation',async()=>{
+ const f=monthlyFixture();
+ f.api.dateTimezone='Asia/Tokyo';
+ for(const field of f.tasks[0].custom_fields) {
+   if(['Contract start','Contract end'].includes(field.name)) {
+     field.value=String(Date.parse(field.value+'T04:00:00+09:00'));
+     field.type='date';
+     field.value_options={time:false};
+   }
+ }
+ f.entries([entry('jan','2026-01-15',15),entry('feb','2026-02-05',3)]);
+ const [r]=await f.month('2026-02-10');
+ assert.equal(r.error,undefined);
+ assert.equal(r.monthly.allowance,25);
+ assert.equal(r.used,3);
+ assert.equal(r.remaining,22);
+ assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='budget').value,25);
+});
+
+test('dry run previews all tasks regardless of Enabled; apply still skips disabled tasks',async()=>{
+ const f=fixture();f.tasks[0]=task('uwbh',{Enabled:false});
+ f.tasks.push(task('second'));
+ const results=await f.run({dryRun:true});
+ assert.equal(results.length,2);
+ assert.equal(results[0].enabled,false);assert.equal(results[0].used,0);
+ assert.equal(results[1].enabled,true);assert.equal(results[1].used,0);
+ f.tasks.pop();
+ let [r]=await f.run({dryRun:true});
+ assert.equal(r.skipped,undefined);assert.equal(r.used,0);
+ [r]=await f.run({dryRun:true,taskId:'uwbh'});assert.equal(r.used,0);
+ [r]=await f.run();assert.equal(r.skipped,true);assert.match(r.reason,/unchecked/);
+ f.tasks[0].custom_fields=f.tasks[0].custom_fields.filter(v=>v.name!=='Enabled');
+ [r]=await f.run({dryRun:true});assert.equal(r.used,0);assert.equal(r.enabled,false);
+ [r]=await f.run();assert.match(r.reason,/Missing custom field/);
+ f.tasks.length=0;
+ [r]=await f.run({dryRun:true});assert.match(r.reason,/No tasks found/);
+ assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
+});
+
+test('field matching accepts ClickUp title capitalization, including monthly output field',async()=>{
+ const f=monthlyFixture();f.api.dateTimezone='America/Denver';
+ for(const field of f.tasks[0].custom_fields) field.name=field.name.replace(/\b\w/g,c=>c.toUpperCase());
+ for(const field of f.tasks[0].custom_fields) {
+   if(field.name==='Contract Start') {field.type='date';field.value='1767265200000';}
+   if(field.name==='Contract End') {field.type='date';field.value='1798714800000';}
+ }
+ const [r]=await f.month('2026-02-10');
+ assert.equal(r.error,undefined);assert.equal(r.monthly.allowance,40);
+ assert.throws(()=>contract(task('missing',{'Contract start':undefined}),'1'),/Contract start: select a date/);
+ const duplicate=task();duplicate.custom_fields.push({name:'Contract Start',value:'2026-01-01'});
+ assert.throws(()=>contract(duplicate,'1'),/Duplicate field/);
+});
+
+test('Folder overview links resolve to their Folder without changing task data',async()=>{
+ const f=fixture();f.tasks[0]=task('uwbh',{'Client Folder':'https://app.clickup.com/1/v/db/2ky4p13w-5099'});
+ const requested=[];f.api.view=async id=>{requested.push(id);return {view:{parent:{type:5,id:'10'}}};};
+ let [r]=await f.run({dryRun:true});assert.equal(r.error,undefined);assert.equal(r.lists.length,5);
+ assert.deepEqual(requested,['2ky4p13w-5099']);
+ assert.equal(f.tasks[0].custom_fields.find(v=>v.name==='Client Folder').value,'https://app.clickup.com/1/v/db/2ky4p13w-5099');
+ f.api.view=async()=>({view:{parent:{type:4,id:'10'}}});
+ [r]=await f.run({dryRun:true});assert.match(r.error,/not located in a Folder/);
+ f.tasks[0]=task('uwbh',{'Client Folder':'https://app.clickup.com/2/v/db/2ky4p13w-5099'});
+ [r]=await f.run({dryRun:true});assert.match(r.error,/cross-workspace/);
+ assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
 });

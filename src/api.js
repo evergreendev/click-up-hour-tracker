@@ -1,12 +1,37 @@
 export class ClickUp {
-  constructor(token, writes = false) { this.token = token; this.writes = writes; }
+  constructor(token, writes = false, runtime = {}) {
+    this.token = token; this.writes = writes;
+    this.fetch = runtime.fetch ?? globalThis.fetch;
+    this.sleep = runtime.sleep ?? (ms => new Promise(resolve => setTimeout(resolve,ms)));
+    this.now = runtime.now ?? Date.now;
+    this.log = runtime.log ?? (message => console.error(message));
+    this.nextRequest = 0;
+  }
+  async waitUntil(time) {
+    while(this.now()<time) await this.sleep(Math.min(30000,time-this.now()));
+  }
   async request(path, query = {}, method = 'GET', body) {
     if (method !== 'GET' && !this.writes) throw Error('Live writes disabled; use sync --apply');
     const url = new URL(`https://api.clickup.com/api/v2/${path}`);
     Object.entries(query).forEach(([k,v]) => url.searchParams.set(k, String(v)));
-    const res = await fetch(url, {method, headers: {Authorization: this.token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), signal: AbortSignal.timeout(60000)});
-    if (!res.ok) throw Error(`ClickUp ${method} ${path}: HTTP ${res.status}`);
-    return res.json();
+    for(let attempt=0;;attempt++) {
+      await this.waitUntil(this.nextRequest);
+      this.nextRequest=this.now()+650;
+      const res = await this.fetch(url, {method, headers: {Authorization: this.token, 'Content-Type':'application/json'}, body: body && JSON.stringify(body), signal: AbortSignal.timeout(60000)});
+      const reset=Number(res.headers.get('x-ratelimit-reset'))*1000;
+      if(res.status===429 && attempt<5) {
+        const retryAfter=res.headers.get('retry-after');
+        const retryTime=retryAfter ? (Number.isFinite(Number(retryAfter)) ? this.now()+Number(retryAfter)*1000 : Date.parse(retryAfter)) : 0;
+        const retryAt=Math.max(this.now()+1000,Number.isFinite(reset)?reset+1000:0,Number.isFinite(retryTime)?retryTime:0);
+        this.nextRequest=Math.max(retryAt,this.now()+(reset || retryTime ? 1000 : 5000*2**attempt));
+        this.log(`ClickUp rate limit reached; retrying in ${Math.ceil((this.nextRequest-this.now())/1000)}s (${attempt+1}/5).`);
+        await res.body?.cancel();
+        continue;
+      }
+      if (!res.ok) throw Error(`ClickUp ${method} ${path}: HTTP ${res.status}`);
+      if(res.headers.get('x-ratelimit-remaining')==='0' && reset>this.now()) this.nextRequest=Math.max(this.nextRequest,reset+1000);
+      return res.json();
+    }
   }
   async registry(id) {
     const result = [];
@@ -18,11 +43,13 @@ export class ClickUp {
     }
   }
   task(id) { return this.request(`task/${id}`, {include_markdown_description:true}); }
+  view(id) { return this.request(`view/${id}`); }
   async members(workspace) {
     const {teams} = await this.request('team');
     const team = teams?.find(t => String(t.id) === workspace);
     if (!team?.members?.length) throw Error('Workspace membership unavailable');
     const me = await this.request('user');
+    this.dateTimezone = me.user?.timezone;
     const role = team.members.find(m => String(m.user.id) === String(me.user?.id))?.user.role;
     if (![1,2].includes(Number(role))) throw Error('Owner/admin API token required for all-staff time');
     return [...new Set(team.members.map(m => String(m.user.id)))];
@@ -39,10 +66,12 @@ export class ClickUp {
   }
   async entries(workspace, list, staff, start, end) {
     const entries=[];
-    // Small windows bound response sizes; endpoint has no documented pagination.
-    for (let from=start;from<end;from+=86400000) {
-      for (const user of staff) {
-        const r=await this.request(`team/${workspace}/time_entries`, {list_id:list, assignee:user,start_date:from,end_date:Math.min(end,from+86400000)-1});
+    // The API accepts comma-separated assignees; avoid one request per person/day.
+    const window=30*86400000;
+    if(!staff.length) throw Error('Cannot fetch time without staff IDs');
+    for (let from=start;from<end;from+=window) {
+      for (let offset=0;offset<staff.length;offset+=50) {
+        const r=await this.request(`team/${workspace}/time_entries`, {list_id:list, assignee:staff.slice(offset,offset+50).join(','),start_date:from,end_date:Math.min(end,from+window)-1});
         if (!Array.isArray(r.data)) throw Error('Incomplete time response');
         entries.push(...r.data);
       }

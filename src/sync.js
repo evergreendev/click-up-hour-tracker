@@ -1,11 +1,14 @@
 import {createHash} from 'node:crypto';
 const BEGIN='<!-- retainer-balance:start -->', END='<!-- retainer-balance:end -->';
 const fail = message => { throw Error(message); };
+const FIELD_NAMES=['Enabled','Client Folder','Contract start','Contract end','Hours allowance','Monthly budget hours','Current month budget hours','Timezone','Alert thresholds','List allowlist','AdOrbit opening hours','Cutover date'];
+const fieldName=name=>FIELD_NAMES.find(n=>n.toLowerCase()===String(name).trim().toLowerCase()) ?? String(name).trim();
 export function fields(task) {
   const f={};
   for (const field of task.custom_fields || []) {
-    if (Object.hasOwn(f,field.name)) fail(`Duplicate field: ${field.name}`);
-    f[field.name]=field.value;
+    const name=fieldName(field.name);
+    if (Object.hasOwn(f,name)) fail(`Duplicate field: ${name}`);
+    f[name]=field.value;
   }
   return f;
 }
@@ -16,6 +19,18 @@ export function link(value, type, workspace) {
   const m=patterns.map(p=>u.pathname.match(p)).find(Boolean);
   if (!m || m[1]!==workspace) fail(`Invalid or cross-workspace ${type} link`);
   return m[2];
+}
+export async function resolveFolderTask(api,task,workspace) {
+  const value=fields(task)['Client Folder'];
+  let url;
+  try {url=new URL(String(value));} catch {fail('Client Folder: enter a ClickUp Folder link');}
+  const match=url.pathname.match(/^\/(\d+)\/v\/db\/([a-zA-Z0-9-]+)\/?$/);
+  if(!match) return task;
+  if(url.protocol!=='https:' || url.hostname!=='app.clickup.com' || match[1]!==workspace) fail('Invalid or cross-workspace folder link');
+  const {view}=await api.view(match[2]);
+  if(Number(view?.parent?.type)!==5 || !/^\d+$/.test(String(view?.parent?.id))) fail('Client Folder: this view is not located in a Folder. Use a view from the client Folder.');
+  const resolved=`https://app.clickup.com/${workspace}/v/f/${view.parent.id}`;
+  return {...task,custom_fields:task.custom_fields.map(f=>fieldName(f.name)==='Client Folder'?{...f,value:resolved}:f)};
 }
 export function midnight(date, zone) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || new Date(date).toISOString().slice(0,10)!==date) fail('Dates must be YYYY-MM-DD');
@@ -29,26 +44,36 @@ export function midnight(date, zone) {
   }
   fail('Cannot resolve local midnight');
 }
-function date(v) {
-  if (typeof v==='number' || /^\d{13}$/.test(String(v))) return new Date(Number(v)).toISOString().slice(0,10);
+function date(v, zone) {
+  if (typeof v==='number' || /^\d{13}$/.test(String(v))) {
+    if (!zone) fail('Authorized user timezone required to read ClickUp Date fields');
+    const timestamp=Number(v);
+    if (!Number.isFinite(timestamp) || !Number.isFinite(new Date(timestamp).getTime())) fail('Invalid Date field timestamp');
+    const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(timestamp).map(p=>[p.type,p.value]));
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  }
   return String(v);
 }
-export function contract(task,workspace) {
+export function contract(task,workspace,dateTimezone) {
   const f=fields(task), zone=f.Timezone || 'America/Denver';
-  const startDate=date(f['Contract start']), endDate=date(f['Contract end']);
+  for (const field of task.custom_fields || []) {
+    if (['Contract start','Contract end','Cutover date'].includes(fieldName(field.name)) && field.type==='date' && field.value_options?.time===true) fail(`${field.name}: select a date without a time`);
+  }
+  for (const name of ['Contract start','Contract end']) if(f[name]===undefined || f[name]===null || f[name]==='') fail(`${name}: select a date in the task's Date custom field`);
+  const startDate=date(f['Contract start'],dateTimezone), endDate=date(f['Contract end'],dateTimezone);
   const next=new Date(endDate+'T00:00:00Z'); next.setUTCDate(next.getUTCDate()+1);
   const start=midnight(startDate,zone), end=midnight(next.toISOString().slice(0,10),zone);
   midnight(endDate,zone);
   const monthly=f['Monthly budget hours']!==undefined && f['Monthly budget hours']!==null && f['Monthly budget hours']!=='';
   const allowance=Number(monthly ? f['Monthly budget hours'] : f['Hours allowance']);
-  const budgetField=task.custom_fields?.find(v=>v.name==='Current month budget hours');
+  const budgetField=task.custom_fields?.find(v=>fieldName(v.name)==='Current month budget hours');
   if(monthly && (!budgetField?.id || budgetField.type!=='number')) fail('Monthly budgets require a Number field named Current month budget hours');
   if (!(allowance>0) || !Number.isFinite(allowance) || start>=end) fail('Invalid allowance or period');
   const hasOpening=f['AdOrbit opening hours']!==undefined && f['AdOrbit opening hours']!==null && f['AdOrbit opening hours']!=='';
   const hasCutover=!!f['Cutover date'];
   if(hasOpening!==hasCutover) fail('Opening hours and cutover date required together');
   const opening=hasOpening?Number(f['AdOrbit opening hours']):0;
-  const from=hasCutover?midnight(date(f['Cutover date']),zone):start;
+  const from=hasCutover?midnight(date(f['Cutover date'],dateTimezone),zone):start;
   if(!Number.isFinite(opening)||opening<0||from<start||from>=end) fail('Invalid migration data');
   const thresholds=String(f['Alert thresholds'] ?? '80,100').split(',').map(Number);
   if(!thresholds.length || thresholds.some(n=>!Number.isFinite(n)||n<=0)) fail('Invalid thresholds');
@@ -98,17 +123,21 @@ export function monthlyBalance(c, entries, instant) {
   return {period,baseBudget:c.allowance,carryover,allowance:c.allowance+carryover,used:current,monthStart,monthEnd};
 }
 export async function sync({api,workspace,registry,state={},save=async()=>{},dryRun=true,taskId,now=()=>new Date().toISOString()}) {
+  const instant=now();
   const tasks=await api.registry(registry), results=[];
   const staff=await api.members(workspace);
   for(const item of tasks) {
     if(taskId && String(item.id)!==taskId) continue;
     try {
       const task=await api.task(item.id), f=fields(task);
-      if(![true,'true',1,'1'].includes(f.Enabled) && !(dryRun && taskId)) continue;
-      const c=contract(task,workspace), instant=now(), lists=await scope(api,c), entries=new Map();
-      const monthly=c.monthly ? monthlyBalance(c,entries,instant) : null;
-      const queryEnd=monthly ? Math.min(c.end,monthly.monthEnd) : c.end;
-      for(const list of lists) for(const e of await api.entries(workspace,list.id,staff,c.from,queryEnd)) {
+      const enabled=[true,'true',1,'1'].includes(f.Enabled);
+      if(!enabled && !dryRun) {
+        results.push({id:String(item.id),name:task.name,skipped:true,reason:Object.hasOwn(f,'Enabled') ? 'Enabled is unchecked. Run dry-run to preview this task.' : 'Missing custom field named Enabled (Checkbox). Add it to the Client Retainers List.'});
+        continue;
+      }
+      const resolvedTask=await resolveFolderTask(api,task,workspace);
+      const c=contract(resolvedTask,workspace,api.dateTimezone), lists=await scope(api,c), entries=new Map();
+      for(const list of lists) for(const e of await api.entries(workspace,list.id,staff,c.from,c.end)) {
         if(!e.id || !Number.isFinite(Number(e.duration)) || !Number.isFinite(Number(e.start))) fail('Malformed time entry');
         if(entries.has(String(e.id)) && JSON.stringify(entries.get(String(e.id)))!==JSON.stringify(e)) fail('Inconsistent duplicate entry; retry');
         entries.set(String(e.id),e);
@@ -131,7 +160,7 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       // Complete every read and validate before publishing anything.
       const comments=comment?await api.comments(c.id):[];
       const already=marker && comments.some(v=>String(v.comment_text ?? v.text ?? v.comment?.map(p=>p.text).join('') ?? '').includes(marker));
-      results.push({id:c.id,name:c.name,lists:lists.map(l=>({id:l.id,name:l.name})),timezone:c.zone,start:new Date(c.start).toISOString(),endExclusive:new Date(c.end).toISOString(),countFrom:new Date(c.from).toISOString(),...(month ? {monthly:month} : {}),openingHours:c.opening,clickUpHours:ms/3600000,used,remaining:c.allowance-used,firstRunReached:previous?[]:reached,proposedComment:already?null:comment});
+      results.push({id:c.id,name:c.name,enabled,lists:lists.map(l=>({id:l.id,name:l.name})),timezone:c.zone,start:new Date(c.start).toISOString(),endExclusive:new Date(c.end).toISOString(),countFrom:new Date(c.from).toISOString(),...(month ? {monthly:month} : {}),openingHours:c.opening,clickUpHours:ms/3600000,used,remaining:c.allowance-used,firstRunReached:previous?[]:reached,proposedComment:already?null:comment});
       if(!dryRun) {
         if(proposed!==description) await api.update(c.id,proposed);
         if(month && (c.budgetField.value===undefined || Number(c.budgetField.value)!==c.allowance)) await api.setField(c.id,c.budgetField.id,c.allowance);
@@ -147,7 +176,8 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       }
     } catch(error) { results.push({id:String(item.id),error:error.message}); }
   }
-  if(taskId && !results.length) results.push({id:taskId,error:'Enabled contract not found in registry'});
+  if(taskId && !results.length) results.push({id:taskId,error:'Task not found in the configured registry List'});
+  if(!taskId && !tasks.length) results.push({skipped:true,reason:'No tasks found in registry List '+registry+'. Check CLICKUP_REGISTRY_LIST_ID and move the existing balance task into that List.'});
   return results;
 }
 

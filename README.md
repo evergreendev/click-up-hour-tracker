@@ -6,7 +6,7 @@ Dependency-free Node.js 22+ CLI. Runs once and exits. Contract data lives in Cli
 
 1. Create a List named **Client Retainers**. Add the custom fields below to the List, and create a task template with Enabled unchecked. Each task represents exactly one contract period and is also its balance task.
 2. Use an owner/admin API token with access to the entire client Folder tree and all relevant staff time. Ensure the authorized Workspace membership includes every staff member/guest whose time must count. The API cannot prove completeness for inaccessible Folders or former staff absent from membership; reconcile these before enabling a contract. Do not use a limited service account.
-3. Set only these deployment values: `CLICKUP_WORKSPACE_ID`, `CLICKUP_REGISTRY_LIST_ID`, `CLICKUP_API_TOKEN`, `RETAINER_STATE_PATH` (absolute path to a persistent JSON file, not a directory). Protect the token and state; back up state. There are no client-specific environment variables.
+3. Copy `.env.example` to `.env` in the project folder and fill in the four values. The CLI automatically loads `.env` from the current working directory; existing environment variables take precedence. `RETAINER_STATE_PATH` is a persistent JSON file path, not a directory; relative paths resolve from the working directory. No extra packages are needed. There are no client-specific environment variables.
 4. Run `node src/cli.js validate`, then `node src/cli.js dry-run --task TASK_ID`. Both calculate full totals and show resolved List names/IDs, local timezone, UTC boundaries, opening/ClickUp hours, remaining hours, first-run reached thresholds, and proposed comments. Neither writes ClickUp or local state.
 5. Review the output, then run `node src/cli.js sync --apply`. Without `--apply`, sync is read-only. Schedule that same command hourly using cron or Windows Task Scheduler with the project working directory and the four settings available to the job. Exit code 1 indicates a contract/global error; other contracts still run when a contract fails. Output is JSON.
 
@@ -14,20 +14,21 @@ Dependency-free Node.js 22+ CLI. Runs once and exits. Contract data lives in Cli
 | --- | --- |
 | Enabled | Checkbox; check only after validation |
 | Client Folder | Website; full Folder link |
-| Contract start | Text, `YYYY-MM-DD`, inclusive |
-| Contract end | Text, `YYYY-MM-DD`, inclusive |
+| Contract start | Date, without a time, inclusive |
+| Contract end | Date, without a time, inclusive |
 | Hours allowance | Number, positive; required for fixed contract budgets |
 | Monthly budget hours | Optional Number, positive; enables monthly carryover instead of Hours allowance |
 | Current month budget hours | Number; required in monthly mode, managed by the sync |
 | Timezone | Optional text; default `America/Denver`, IANA timezone |
 | Alert thresholds | Optional text, comma-separated percentages; default `80,100` |
-| List allowlist | Optional long text, List links separated by whitespace or commas |
 | AdOrbit opening hours | Optional number, nonnegative (including explicit zero) |
-| Cutover date | Optional text, `YYYY-MM-DD`; required with opening hours |
+| Cutover date | Optional Date, without a time; required with opening hours |
 
-Use text dates to avoid ClickUp date-field timezone conversions. Numeric API date values are also accepted as UTC calendar dates. Folder links: `https://app.clickup.com/WORKSPACE/v/f/FOLDER` (also `/v/o/f/FOLDER`). List links: `/WORKSPACE/v/li/LIST` or `/WORKSPACE/v/l/6-LIST-VIEW`. Unrecognized/cross-workspace links fail validation rather than guessing.
+Use Date fields without a time. The CLI decodes API timestamps in the authorized user timezone, then applies the contract timezone to the selected calendar dates. Existing ISO text dates remain supported. Folder links: `https://app.clickup.com/WORKSPACE/v/f/FOLDER` (also `/v/o/f/FOLDER`). List links: `/WORKSPACE/v/li/LIST` or `/WORKSPACE/v/l/6-LIST-VIEW`. Unrecognized/cross-workspace links fail validation rather than guessing.
 
-Default scope is every List in the linked Folder and nested subfolders, including archived Lists. An allowlist narrows that scope; every selected List must belong to the Folder tree. There is no implicit name/tag rule for “service” Lists: use the allowlist when any Folder work is outside the contract. Validation displays exactly what will count.
+The client Folder is the entire scope: the sync automatically includes every List in that Folder and its subfolders, including archived Lists. New Lists are discovered on every run. No List links or List allowlist field are needed for normal setup. Validation displays exactly what will count. An optional `List allowlist` Long Text field remains available for contracts that explicitly need a narrower scope; leave it unset to include the entire Folder.
+
+Folder overview links such as `/WORKSPACE/v/db/VIEW-ID` are also accepted in Client Folder. The CLI resolves them using [Get View](https://developer.clickup.com/reference/getview) and requires the view's parent to be a Folder ([parent type 5](https://developer.clickup.com/docs/views)). It counts the entire Folder rather than the contents or filters of that view. No ClickUp field values are rewritten.
 
 Add recipients in the balance task's **Followers** control (called watchers in the API). ClickUp comments notify followers and assignees; recipients can manage notification preferences in ClickUp. The CLI does not send email or maintain a separate recipient list.
 
@@ -39,9 +40,9 @@ For renewal, create a **new task** with the new period and allowance. Disable th
 
 ### UWBH rollout
 
-Keep the existing UWBH retainer balance task. Move that task to Client Retainers using ClickUp's Move action (do not duplicate/recreate it); its task ID, description, comments and followers remain the contract identity. Add registry fields, title it UWBH, set 2026-01-01 through 2026-12-31 and **200 hours**, and link its client Folder. Paste the actual List links for **ALICE, Outreach, Marketing, Campaign** into List allowlist, excluding other Folder work. Verify the four resolved names/IDs in dry-run output.
+Keep the existing UWBH retainer balance task. Move that task to Client Retainers using ClickUp's Move action (do not duplicate/recreate it); its task ID, description, comments and followers remain the contract identity. Add registry fields, title it UWBH, set 2026-01-01 through 2026-12-31 and **200 hours**, and link its client Folder. Leave List allowlist unset (clear it if previously populated). All Lists in the UWBH Folder and its subfolders count automatically, including ALICE, Outreach, Marketing, and Campaign. Review the resolved Lists in dry-run output.
 
-Leave **both** AdOrbit opening hours and Cutover date unset until reconciliation. Until then the preview counts ClickUp time for all of 2026 and may not represent the complete historical balance. Keep Enabled unchecked while reconciling; `dry-run --task TASK_ID` also previews a disabled task. Enable it after reviewing reconciliation and before scheduling apply runs. After reconciliation, set both the opening total through the day before cutover and the cutover date (or leave both unset if ClickUp contains the complete period). Never enter a guessed opening balance. Review already-reached thresholds before the first apply. UWBH's settings are fixture/task data only; there is no UWBH branch in runtime code.
+Leave **both** AdOrbit opening hours and Cutover date unset until reconciliation. Until then the preview counts ClickUp time for all of 2026 and may not represent the complete historical balance. Keep Enabled unchecked while reconciling; `dry-run` previews all contracts, including disabled tasks; `--task TASK_ID` narrows the preview to one task. Enable it after reviewing reconciliation and before scheduling apply runs. After reconciliation, set both the opening total through the day before cutover and the cutover date (or leave both unset if ClickUp contains the complete period). Never enter a guessed opening balance. Review already-reached thresholds before the first apply. UWBH's settings are fixture/task data only; there is no UWBH branch in runtime code.
 
 ## Calculation and recovery
 
@@ -55,7 +56,7 @@ A durable pending alert is saved before posting; comments contain a deterministi
 
 One apply process at a time is enforced by an exclusive `.lock` file adjacent to state. After a crash, confirm no job is running before removing that file. State writes use flush + atomic rename. Keep state on a local durable filesystem supporting atomic replacement; do not run independent schedulers against replicated copies. Missing state intentionally triggers first-run baselining; corrupted state aborts rather than resetting alerts. Back up state before rollout and after each renewal.
 
-Time queries are split by staff and UTC day to bound request sizes. There is no documented pagination for the time-range endpoint; the CLI does not infer undocumented limits or silently accept missing response arrays. Large contracts can take time and hit rate limits; HTTP errors (including 429) fail that contract for retry on a later run. Access-denied resources or API omissions cannot be reconstructed locally.
+Time queries use 30-day windows and batches of up to 50 staff IDs per request. Requests are paced at least 650ms apart. On HTTP 429 the CLI waits for ClickUp's rate-limit reset or Retry-After header, then retries up to five times, printing wait messages to stderr. Other HTTP failures and exhausted retries fail that contract without publishing an incomplete balance. There is no documented pagination for the time-range endpoint; missing response arrays are errors. Access-denied resources or API omissions cannot be reconstructed locally. ClickUp documents its per-token limits and reset headers in [Rate Limits](https://developer.clickup.com/docs/rate-limits).
 
 ## Verified API references
 
@@ -72,6 +73,12 @@ Official ClickUp documentation checked 2026-11-16:
 
 `npm.cmd test` (Windows) or `npm test`; `npm.cmd run build` checks syntax. Tests use injected mock APIs, never a real token. Covers UWBH onboarding, adding a second client, renewal, nested/mixed Folder scope, migration pairs, DST, partial failure isolation, recalculation/deduplication, first-run suppression, rename stability, combined thresholds, retry reconciliation, read-only behavior and API pagination/write guard.
 
+
+## ClickUp field types
+
+Use **Date** Custom Fields for `Contract start`, `Contract end`, and `Cutover date`. Select a calendar date without adding a time. For UWBH select January 1, 2026 and December 31, 2026; leave Cutover date blank until reconciled. Existing ISO Text values remain supported for compatibility.
+
+ClickUp returns date-only Custom Fields as 04:00 in the authorized API user's timezone ([official documentation](https://developer.clickup.com/docs/customfields)). The CLI reads that user's timezone automatically, recovers the selected calendar date, then applies the contract timezone to calculate inclusive start/end boundaries. No extra deployment setting is needed. A missing API-user timezone or a Date field with an explicit time is a validation error.
 
 ## Monthly budgets
 
