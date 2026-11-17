@@ -67,6 +67,8 @@ export function contract(task,workspace,dateTimezone) {
   const monthly=f['Monthly budget hours']!==undefined && f['Monthly budget hours']!==null && f['Monthly budget hours']!=='';
   const allowance=Number(monthly ? f['Monthly budget hours'] : f['Hours allowance']);
   const budgetField=task.custom_fields?.find(v=>fieldName(v.name)==='Current month budget hours');
+  const remainingField=task.custom_fields?.find(v=>String(v.name).trim().toLowerCase()==='hours remaining');
+  if(remainingField && (!remainingField.id || remainingField.type!=='number')) fail('Hours remaining must be a Number custom field');
   if(monthly && (!budgetField?.id || budgetField.type!=='number')) fail('Monthly budgets require a Number field named Current month budget hours');
   if (!(allowance>0) || !Number.isFinite(allowance) || start>=end) fail('Invalid allowance or period');
   const hasOpening=f['AdOrbit opening hours']!==undefined && f['AdOrbit opening hours']!==null && f['AdOrbit opening hours']!=='';
@@ -78,7 +80,7 @@ export function contract(task,workspace,dateTimezone) {
   const thresholds=String(f['Alert thresholds'] ?? '80,100').split(',').map(Number);
   if(!thresholds.length || thresholds.some(n=>!Number.isFinite(n)||n<=0)) fail('Invalid thresholds');
   const allow=f['List allowlist']?String(f['List allowlist']).split(/[\s,]+/).filter(Boolean).map(v=>link(v,'list',workspace)):null;
-  return {id:String(task.id),name:task.name,folder:link(f['Client Folder'],'folder',workspace),start,end,from,zone,opening,allowance,monthly,budgetField,thresholds:[...new Set(thresholds)].sort((a,b)=>a-b),allow};
+  return {id:String(task.id),name:task.name,folder:link(f['Client Folder'],'folder',workspace),start,end,from,zone,opening,allowance,monthly,budgetField,remainingField,thresholds:[...new Set(thresholds)].sort((a,b)=>a-b),allow};
 }
 export async function scope(api,c) {
   const root=await api.folder(c.folder), folders=[];
@@ -148,6 +150,8 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       const month=c.monthly ? monthlyBalance(c,entries,instant) : null;
       if(month) Object.assign(c,{allowance:month.allowance});
       const used=month ? month.used : c.opening+ms/3600000;
+      const remainingValue=Number((c.allowance-used).toFixed(2));
+      const updateRemaining=c.remainingField && (c.remainingField.value===undefined || c.remainingField.value===null || c.remainingField.value==='' || Number(c.remainingField.value)!==remainingValue);
       const stored=state[c.id];
       const previous=month && stored?.period!==month.period && !stored?.pending ? undefined : stored;
       const reached=c.thresholds.filter(t=>(c.allowance<=0 ? used>=c.allowance : used/c.allowance*100>=t));
@@ -164,6 +168,7 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       if(!dryRun) {
         if(proposed!==description) await api.update(c.id,proposed);
         if(month && (c.budgetField.value===undefined || Number(c.budgetField.value)!==c.allowance)) await api.setField(c.id,c.budgetField.id,c.allowance);
+        if(updateRemaining) await api.setField(c.id,c.remainingField.id,remainingValue);
         if(comment && !previous?.pending) {
           const pending={...previous,pending:{thresholds:newly,text:comment}};
           await save({...state,[c.id]:pending});

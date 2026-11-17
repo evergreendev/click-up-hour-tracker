@@ -19,6 +19,7 @@ Dependency-free Node.js 22+ CLI. Runs once and exits. Contract data lives in Cli
 | Hours allowance | Number, positive; required for fixed contract budgets |
 | Monthly budget hours | Optional Number, positive; enables monthly carryover instead of Hours allowance |
 | Current month budget hours | Number; required in monthly mode, managed by the sync |
+| Hours remaining | Optional Number; managed by the sync, rounded to two decimals; negative means over budget |
 | Timezone | Optional text; default `America/Denver`, IANA timezone |
 | Alert thresholds | Optional text, comma-separated percentages; default `80,100` |
 | AdOrbit opening hours | Optional number, nonnegative (including explicit zero) |

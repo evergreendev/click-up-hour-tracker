@@ -166,3 +166,23 @@ test('Folder overview links resolve to their Folder without changing task data',
  [r]=await f.run({dryRun:true});assert.match(r.error,/cross-workspace/);
  assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
 });
+
+test('Hours remaining field updates fixed budget, overage and corrections without redundant writes',async()=>{
+ const f=fixture(),updates=[];
+ f.tasks[0].custom_fields.push({id:'remaining',name:'Hours remaining',type:'number'});
+ f.api.setField=async(id,field,value)=>{updates.push(value);f.tasks[0].custom_fields.find(v=>v.id===field).value=value;};
+ f.hours(103.600608);await f.run({dryRun:true});assert.equal(updates.length,0);
+ await f.run();assert.deepEqual(updates,[96.4]);await f.run();assert.equal(updates.length,1);
+ f.hours(210);await f.run();assert.equal(updates.at(-1),-10);
+ f.hours(100);await f.run();assert.equal(updates.at(-1),100);
+ f.broken(true);await f.run();assert.equal(updates.length,3);
+});
+test('Hours remaining uses adjusted monthly budget; invalid field blocks all publishing',async()=>{
+ const f=monthlyFixture();
+ f.tasks[0].custom_fields.push({id:'remaining',name:'Hours remaining',type:'number'});
+ f.entries([entry('jan','2026-01-15',15),entry('feb','2026-02-05',3)]);
+ await f.month('2026-02-10');
+ assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='remaining').value,22);
+ const g=fixture();g.tasks[0].custom_fields.push({id:'remaining',name:'Hours remaining',type:'text'});
+ const [r]=await g.run();assert.match(r.error,/must be a Number/);assert.equal(g.writes.length,0);assert.deepEqual(g.state,{});
+});
