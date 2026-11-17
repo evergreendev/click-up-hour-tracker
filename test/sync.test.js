@@ -54,3 +54,36 @@ test('HTTP adapter handles registry/comments pagination and defaults to blocked 
  const calls=[];api.request=async(path,q)=>{calls.push(q);if(path.endsWith('/task'))return q.page===0?{tasks:[task()],last_page:false}:{tasks:[],last_page:true};return q.start_id?{comments:[]}:{comments:[{id:'c',date:'123'}]};};
  assert.equal((await api.registry('r')).length,1);assert.equal((await api.comments('x')).length,1);assert.equal(calls.at(-1).start_id,'c');
 });
+
+function monthlyFixture() {
+ const f=fixture();
+ f.tasks[0]=task('uwbh',{'Monthly budget hours':20});
+ f.tasks[0].custom_fields.push({id:'budget',name:'Current month budget hours',type:'number'});
+ f.api.setField=async(id,field,value)=>{f.writes.push({field,value});f.tasks[0].custom_fields.find(v=>v.id===field).value=value;};
+ let entries=[];
+ f.api.entries=async()=>entries;
+ return {...f,entries:v=>entries=v,month:date=>f.run({now:()=>date+'T12:00:00Z'})};
+}
+const entry=(id,date,hours)=>({id,start:midnight(date,'America/Denver'),duration:hours*3600000});
+test('monthly budget carries unused hours and overages, recalculates and does not compound',async()=>{
+ const f=monthlyFixture();f.entries([entry('jan','2026-01-15',15),entry('feb','2026-02-05',3)]);
+ let [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,25);assert.equal(r.used,3);assert.equal(r.remaining,22);
+ const writes=f.writes.length;await f.month('2026-02-10');assert.equal(f.writes.length,writes);
+ f.entries([entry('jan','2026-01-15',25)]);[r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,15);
+ [r]=await f.month('2026-04-10');assert.equal(r.monthly.allowance,55);
+ assert.match(f.tasks[0].markdown_description,/2026-04/);
+});
+test('monthly mode dry run, negative carryover, validation and migration',async()=>{
+ const f=monthlyFixture();f.entries([entry('jan','2026-01-15',50)]);
+ let [r]=await f.run({dryRun:true,now:()=> '2026-02-10T12:00:00Z'});
+ assert.equal(r.monthly.allowance,-10);assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
+ [r]=await f.month('2027-01-10');assert.match(r.error,/outside/);
+ f.tasks[0].custom_fields=f.tasks[0].custom_fields.filter(v=>v.id!=='budget');
+ [r]=await f.month('2026-02-10');assert.match(r.error,/Current month budget/);
+ const g=monthlyFixture();g.tasks[0].custom_fields.push({name:'AdOrbit opening hours',value:25},{name:'Cutover date',value:'2026-02-01'});
+ [r]=await g.month('2026-03-10');assert.equal(r.monthly.allowance,35);
+});
+test('custom field adapter uses dedicated endpoint and write guard',async()=>{
+ const api=new ClickUp('mock');await assert.rejects(api.setField('x','b',25),/disabled/);
+ api.request=async(...args)=>args;assert.deepEqual(await api.setField('x','b',25),['task/x/field/b',{},'POST',{value:25}]);
+});

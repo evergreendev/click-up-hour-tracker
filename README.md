@@ -16,7 +16,9 @@ Dependency-free Node.js 22+ CLI. Runs once and exits. Contract data lives in Cli
 | Client Folder | Website; full Folder link |
 | Contract start | Text, `YYYY-MM-DD`, inclusive |
 | Contract end | Text, `YYYY-MM-DD`, inclusive |
-| Hours allowance | Number, positive |
+| Hours allowance | Number, positive; required for fixed contract budgets |
+| Monthly budget hours | Optional Number, positive; enables monthly carryover instead of Hours allowance |
+| Current month budget hours | Number; required in monthly mode, managed by the sync |
 | Timezone | Optional text; default `America/Denver`, IANA timezone |
 | Alert thresholds | Optional text, comma-separated percentages; default `80,100` |
 | List allowlist | Optional long text, List links separated by whitespace or commas |
@@ -70,3 +72,11 @@ Official ClickUp documentation checked 2026-11-16:
 
 `npm.cmd test` (Windows) or `npm test`; `npm.cmd run build` checks syntax. Tests use injected mock APIs, never a real token. Covers UWBH onboarding, adding a second client, renewal, nested/mixed Folder scope, migration pairs, DST, partial failure isolation, recalculation/deduplication, first-run suppression, rename stability, combined thresholds, retry reconciliation, read-only behavior and API pagination/write guard.
 
+
+## Monthly budgets
+
+Set **Monthly budget hours** on the registry task to the base hours granted each calendar month. Add a Number custom field named **Current month budget hours**; apply runs write the adjusted budget there using ClickUp's [Set Custom Field Value endpoint](https://developer.clickup.com/reference/setcustomfieldvalue). Keep the base field unchanged unless you intend to change the budget for the entire contract history.
+
+For a 20-hour base, using 15 hours in January gives February 25 hours; using 25 hours gives February 15 hours. Carryover accumulates across all months since Contract start, including months with no time. Negative budgets remain negative so debt is preserved. The current month's time reduces the displayed remaining hours, not the budget field. Calendar months use the task timezone; partial first/last months receive the full base budget. Runs outside the contract period report an error and leave the task unchanged.
+
+Every run rebuilds carryover from historical time, so retries do not compound it and late corrections update the balance. Opening migration hours count as aggregate usage before Cutover date; when cutover is in the current month, that aggregate counts in the current month's usage (earlier month allocation cannot be inferred). Alerts use the adjusted monthly budget and baseline again for each new month. Dry-run previews monthly values without writing. Existing tasks without Monthly budget hours retain fixed-period behavior. Keep scheduling sync to publish month changes; ClickUp does not calculate this itself.

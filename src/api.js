@@ -62,5 +62,6 @@ export class ClickUp {
     }
   }
   update(id, description) { return this.request(`task/${id}`,{},'PUT',{markdown_description:description}); }
+  setField(id, field, value) { return this.request(`task/${id}/field/${field}`,{},'POST',{value}); }
   comment(id, text) { return this.request(`task/${id}/comment`,{},'POST',{comment_text:text,notify_all:true}); }
 }
