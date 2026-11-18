@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 const BEGIN='<!-- retainer-balance:start -->', END='<!-- retainer-balance:end -->';
 const fail = message => { throw Error(message); };
-const FIELD_NAMES=['Enabled','Client Folder','Contract start','Contract end','Hours allowance','Monthly budget hours','Current month budget hours','Timezone','Alert thresholds','List allowlist','AdOrbit opening hours','Cutover date'];
+const FIELD_NAMES=['Enabled','Client Folder','Contract start','Contract end','Hours allowance','Monthly budget hours','Current month budget hours','Hours remaining','Budget remaining','Timezone','Alert thresholds','List allowlist','AdOrbit opening hours','Cutover date'];
 const fieldName=name=>FIELD_NAMES.find(n=>n.toLowerCase()===String(name).trim().toLowerCase()) ?? String(name).trim();
 export function fields(task) {
   const f={};
@@ -68,6 +68,12 @@ export function contract(task,workspace,dateTimezone) {
   const allowance=Number(monthly ? f['Monthly budget hours'] : f['Hours allowance']);
   const budgetField=task.custom_fields?.find(v=>fieldName(v.name)==='Current month budget hours');
   const remainingField=task.custom_fields?.find(v=>String(v.name).trim().toLowerCase()==='hours remaining');
+  const progressField=task.custom_fields?.find(v=>fieldName(v.name)==='Budget remaining');
+  if(progressField) {
+    const config=progressField.type_config;
+    if(!progressField.id || !(progressField.type==='manual_progress' || (progressField.type==='progress' && config?.method==='manual'))) fail('Budget remaining must be a Progress (Manual) custom field');
+    if(config?.start===undefined || config?.end===undefined || config.start===null || config.end===null || !Number.isFinite(Number(config.start)) || !Number.isFinite(Number(config.end)) || Number(config.end)<=Number(config.start)) fail('Budget remaining requires a valid progress range with end greater than start');
+  }
   if(remainingField && (!remainingField.id || remainingField.type!=='number')) fail('Hours remaining must be a Number custom field');
   if(monthly && (!budgetField?.id || budgetField.type!=='number')) fail('Monthly budgets require a Number field named Current month budget hours');
   if (!(allowance>0) || !Number.isFinite(allowance) || start>=end) fail('Invalid allowance or period');
@@ -80,7 +86,7 @@ export function contract(task,workspace,dateTimezone) {
   const thresholds=String(f['Alert thresholds'] ?? '80,100').split(',').map(Number);
   if(!thresholds.length || thresholds.some(n=>!Number.isFinite(n)||n<=0)) fail('Invalid thresholds');
   const allow=f['List allowlist']?String(f['List allowlist']).split(/[\s,]+/).filter(Boolean).map(v=>link(v,'list',workspace)):null;
-  return {id:String(task.id),name:task.name,folder:link(f['Client Folder'],'folder',workspace),start,end,from,zone,opening,allowance,monthly,budgetField,remainingField,thresholds:[...new Set(thresholds)].sort((a,b)=>a-b),allow};
+  return {id:String(task.id),name:task.name,folder:link(f['Client Folder'],'folder',workspace),start,end,from,zone,opening,allowance,monthly,budgetField,remainingField,progressField,thresholds:[...new Set(thresholds)].sort((a,b)=>a-b),allow};
 }
 export async function scope(api,c) {
   const root=await api.folder(c.folder), folders=[];
@@ -152,6 +158,14 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       const used=month ? month.used : c.opening+ms/3600000;
       const remainingValue=Number((c.allowance-used).toFixed(2));
       const updateRemaining=c.remainingField && (c.remainingField.value===undefined || c.remainingField.value===null || c.remainingField.value==='' || Number(c.remainingField.value)!==remainingValue);
+      const budgetRemainingPercent=Number((c.allowance>0 ? Math.max(0,Math.min(1,(c.allowance-used)/c.allowance))*100 : 0).toFixed(2));
+      let progressValue, updateProgress=false;
+      if(c.progressField) {
+        const {start,end}=c.progressField.type_config;
+        progressValue=Number((Number(start)+(Number(end)-Number(start))*budgetRemainingPercent/100).toFixed(6));
+        const current=c.progressField.value?.current ?? c.progressField.value;
+        updateProgress=current===undefined || current===null || current==='' || Number(current)!==progressValue;
+      }
       const stored=state[c.id];
       const previous=month && stored?.period!==month.period && !stored?.pending ? undefined : stored;
       const reached=c.thresholds.filter(t=>(c.allowance<=0 ? used>=c.allowance : used/c.allowance*100>=t));
@@ -164,11 +178,13 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       // Complete every read and validate before publishing anything.
       const comments=comment?await api.comments(c.id):[];
       const already=marker && comments.some(v=>String(v.comment_text ?? v.text ?? v.comment?.map(p=>p.text).join('') ?? '').includes(marker));
-      results.push({id:c.id,name:c.name,enabled,lists:lists.map(l=>({id:l.id,name:l.name})),timezone:c.zone,start:new Date(c.start).toISOString(),endExclusive:new Date(c.end).toISOString(),countFrom:new Date(c.from).toISOString(),...(month ? {monthly:month} : {}),openingHours:c.opening,clickUpHours:ms/3600000,used,remaining:c.allowance-used,firstRunReached:previous?[]:reached,proposedComment:already?null:comment});
+      const progressPreview=c.progressField ? {budgetRemainingPercent,proposedProgressUpdate:updateProgress ? {fieldId:c.progressField.id,value:{current:progressValue}} : null} : {};
+      results.push({id:c.id,name:c.name,enabled,...progressPreview,lists:lists.map(l=>({id:l.id,name:l.name})),timezone:c.zone,start:new Date(c.start).toISOString(),endExclusive:new Date(c.end).toISOString(),countFrom:new Date(c.from).toISOString(),...(month ? {monthly:month} : {}),openingHours:c.opening,clickUpHours:ms/3600000,used,remaining:c.allowance-used,firstRunReached:previous?[]:reached,proposedComment:already?null:comment});
       if(!dryRun) {
         if(proposed!==description) await api.update(c.id,proposed);
         if(month && (c.budgetField.value===undefined || Number(c.budgetField.value)!==c.allowance)) await api.setField(c.id,c.budgetField.id,c.allowance);
         if(updateRemaining) await api.setField(c.id,c.remainingField.id,remainingValue);
+        if(updateProgress) await api.setField(c.id,c.progressField.id,{current:progressValue});
         if(comment && !previous?.pending) {
           const pending={...previous,pending:{thresholds:newly,text:comment}};
           await save({...state,[c.id]:pending});

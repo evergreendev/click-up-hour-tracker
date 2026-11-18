@@ -20,6 +20,7 @@ Dependency-free Node.js 22+ CLI. Runs once and exits. Contract data lives in Cli
 | Monthly budget hours | Optional Number, positive; enables monthly carryover instead of Hours allowance |
 | Current month budget hours | Number; required in monthly mode, managed by the sync |
 | Hours remaining | Optional Number; managed by the sync, rounded to two decimals; negative means over budget |
+| Budget remaining | Optional Progress (Manual); managed by the sync as the percentage of budget left |
 | Timezone | Optional text; default `America/Denver`, IANA timezone |
 | Alert thresholds | Optional text, comma-separated percentages; default `80,100` |
 | AdOrbit opening hours | Optional number, nonnegative (including explicit zero) |
@@ -28,6 +29,8 @@ Dependency-free Node.js 22+ CLI. Runs once and exits. Contract data lives in Cli
 Use Date fields without a time. The CLI decodes API timestamps in the authorized user timezone, then applies the contract timezone to the selected calendar dates. Existing ISO text dates remain supported. Folder links: `https://app.clickup.com/WORKSPACE/v/f/FOLDER` (also `/v/o/f/FOLDER`). List links: `/WORKSPACE/v/li/LIST` or `/WORKSPACE/v/l/6-LIST-VIEW`. Unrecognized/cross-workspace links fail validation rather than guessing.
 
 The client Folder is the entire scope: the sync automatically includes every List in that Folder and its subfolders, including archived Lists. New Lists are discovered on every run. No List links or List allowlist field are needed for normal setup. Validation displays exactly what will count. An optional `List allowlist` Long Text field remains available for contracts that explicitly need a narrower scope; leave it unset to include the entire Folder.
+
+To display a remaining-budget bar, add **Budget remaining** as a **Progress (Manual)** field on Client Retainers (a range of 0 to 100 is recommended). The next `sync --apply` fills it automatically alongside Hours remaining. It shows remaining hours divided by the contract allowance, or by the current month's carryover-adjusted budget in monthly mode. The percentage stays between 0% and 100%; zero or negative budgets show 0%. Hours remaining retains negative overages. Custom progress ranges are supported by scaling the percentage to that range. Dry-run shows `budgetRemainingPercent` and any `proposedProgressUpdate`, without writing. Missing optional fields are skipped; a Budget remaining field of the wrong type or with an invalid range fails validation before publishing. The [official Custom Fields documentation](https://developer.clickup.com/docs/customfields) specifies the manual progress payload as `{ "value": { "current": ... } }`.
 
 Folder overview links such as `/WORKSPACE/v/db/VIEW-ID` are also accepted in Client Folder. The CLI resolves them using [Get View](https://developer.clickup.com/reference/getview) and requires the view's parent to be a Folder ([parent type 5](https://developer.clickup.com/docs/views)). It counts the entire Folder rather than the contents or filters of that view. No ClickUp field values are rewritten.
 

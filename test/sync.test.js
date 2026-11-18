@@ -186,3 +186,46 @@ test('Hours remaining uses adjusted monthly budget; invalid field blocks all pub
  const g=fixture();g.tasks[0].custom_fields.push({id:'remaining',name:'Hours remaining',type:'text'});
  const [r]=await g.run();assert.match(r.error,/must be a Number/);assert.equal(g.writes.length,0);assert.deepEqual(g.state,{});
 });
+
+function progressFixture(f=fixture(),start=0,end=100) {
+ const updates=[];
+ f.tasks[0].custom_fields.push({id:'progress',name:'Budget remaining',type:'manual_progress',type_config:{start,end}},{id:'remaining',name:'Hours remaining',type:'number'});
+ f.api.setField=async(id,field,value)=>{updates.push({field,value});f.tasks[0].custom_fields.find(v=>v.id===field).value=value;};
+ return {...f,updates};
+}
+test('Budget remaining previews and updates alongside Hours remaining; unchanged values avoid writes',async()=>{
+ const f=progressFixture();f.hours(103.600608);
+ const [preview]=await f.run({dryRun:true});
+ assert.equal(preview.budgetRemainingPercent,48.2);
+ assert.deepEqual(preview.proposedProgressUpdate,{fieldId:'progress',value:{current:48.2}});
+ assert.equal(f.updates.length,0);assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
+ await f.run();assert.deepEqual(f.updates,[{field:'remaining',value:96.4},{field:'progress',value:{current:48.2}}]);
+ await f.run();assert.equal(f.updates.length,2);
+ f.hours(210);await f.run();assert.deepEqual(f.updates.slice(-2),[{field:'remaining',value:-10},{field:'progress',value:{current:0}}]);
+ f.hours(0);await f.run();assert.deepEqual(f.updates.at(-1),{field:'progress',value:{current:100}});
+ f.broken(true);const count=f.updates.length;await f.run();assert.equal(f.updates.length,count);
+});
+test('Budget remaining maps percentage to configured range, accepts numeric current strings and legacy manual type',async()=>{
+ const f=progressFixture(fixture(),10,30);
+ const field=f.tasks[0].custom_fields.find(v=>v.id==='progress');
+ field.name='BUDGET REMAINING';field.type='progress';field.type_config.method='manual';
+ f.hours(100);await f.run();assert.deepEqual(f.updates.at(-1),{field:'progress',value:{current:20}});
+ field.value={current:'20',percent:50};const count=f.updates.length;await f.run();assert.equal(f.updates.length,count);
+});
+test('monthly progress uses carryover-adjusted budget and handles zero or negative available budgets',async()=>{
+ const f=progressFixture(monthlyFixture());
+ f.entries([entry('jan','2026-01-15',15),entry('feb','2026-02-05',3)]);
+ let [r]=await f.month('2026-02-10');assert.equal(r.budgetRemainingPercent,88);
+ assert.deepEqual(f.updates.at(-1),{field:'progress',value:{current:88}});
+ f.entries([entry('jan','2026-01-15',40)]);
+ [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,0);assert.equal(r.budgetRemainingPercent,0);
+ f.entries([entry('jan','2026-01-15',50)]);
+ [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,-10);assert.equal(r.budgetRemainingPercent,0);
+});
+test('Budget remaining rejects auto progress or invalid ranges before publishing',async()=>{
+ for(const config of [{type:'automatic_progress'},{type_config:{start:100,end:0}},{type_config:{start:0}}]) {
+   const f=progressFixture();Object.assign(f.tasks[0].custom_fields.find(v=>v.id==='progress'),config);
+   const [r]=await f.run();assert.match(r.error,/Budget remaining/);
+   assert.equal(f.updates.length,0);assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
+ }
+});
