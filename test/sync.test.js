@@ -212,15 +212,16 @@ test('Budget remaining maps percentage to configured range, accepts numeric curr
  f.hours(100);await f.run();assert.deepEqual(f.updates.at(-1),{field:'progress',value:{current:20}});
  field.value={current:'20',percent:50};const count=f.updates.length;await f.run();assert.equal(f.updates.length,count);
 });
-test('monthly progress uses carryover-adjusted budget and handles zero or negative available budgets',async()=>{
+test('monthly progress uses overall contract allowance and usage even when monthly budget is exhausted',async()=>{
  const f=progressFixture(monthlyFixture());
  f.entries([entry('jan','2026-01-15',15),entry('feb','2026-02-05',3)]);
- let [r]=await f.month('2026-02-10');assert.equal(r.budgetRemainingPercent,88);
- assert.deepEqual(f.updates.at(-1),{field:'progress',value:{current:88}});
+ let [r]=await f.month('2026-02-10');assert.equal(r.budgetRemainingPercent,91);
+ assert.equal(r.overallAllowance,200);assert.equal(r.overallUsed,18);assert.equal(r.overallRemaining,182);
+ assert.deepEqual(f.updates.at(-1),{field:'progress',value:{current:91}});
  f.entries([entry('jan','2026-01-15',40)]);
- [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,0);assert.equal(r.budgetRemainingPercent,0);
+ [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,0);assert.equal(r.budgetRemainingPercent,80);
  f.entries([entry('jan','2026-01-15',50)]);
- [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,-10);assert.equal(r.budgetRemainingPercent,0);
+ [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,-10);assert.equal(r.budgetRemainingPercent,75);
 });
 test('Budget remaining rejects auto progress or invalid ranges before publishing',async()=>{
  for(const config of [{type:'automatic_progress'},{type_config:{start:100,end:0}},{type_config:{start:0}}]) {
@@ -228,4 +229,15 @@ test('Budget remaining rejects auto progress or invalid ranges before publishing
    const [r]=await f.run();assert.match(r.error,/Budget remaining/);
    assert.equal(f.updates.length,0);assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
  }
+});
+
+test('overall progress does not reset each month and includes reconciled opening hours',async()=>{
+ const f=progressFixture(monthlyFixture());
+ f.tasks[0].custom_fields.push({name:'AdOrbit opening hours',value:25},{name:'Cutover date',value:'2026-02-01'});
+ f.entries([entry('before-cutover','2026-01-15',80),entry('feb','2026-02-05',5)]);
+ let [r]=await f.month('2026-02-10');assert.equal(r.overallUsed,30);assert.equal(r.budgetRemainingPercent,85);
+ [r]=await f.month('2026-03-10');assert.equal(r.budgetRemainingPercent,85);
+ const g=progressFixture(monthlyFixture());
+ g.tasks[0].custom_fields=g.tasks[0].custom_fields.filter(v=>v.name!=='Hours allowance');
+ [r]=await g.month('2026-02-10');assert.equal(r.overallAllowance,240);assert.equal(r.budgetRemainingPercent,100);
 });

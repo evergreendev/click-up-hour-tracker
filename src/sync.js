@@ -66,6 +66,10 @@ export function contract(task,workspace,dateTimezone) {
   midnight(endDate,zone);
   const monthly=f['Monthly budget hours']!==undefined && f['Monthly budget hours']!==null && f['Monthly budget hours']!=='';
   const allowance=Number(monthly ? f['Monthly budget hours'] : f['Hours allowance']);
+  const hasOverall=f['Hours allowance']!==undefined && f['Hours allowance']!==null && f['Hours allowance']!=='';
+  const contractMonths=(Number(endDate.slice(0,4))-Number(startDate.slice(0,4)))*12+Number(endDate.slice(5,7))-Number(startDate.slice(5,7))+1;
+  const overallAllowance=monthly && !hasOverall ? allowance*contractMonths : Number(f['Hours allowance']);
+  if(!Number.isFinite(overallAllowance) || overallAllowance<=0) fail('Hours allowance must be positive when set');
   const budgetField=task.custom_fields?.find(v=>fieldName(v.name)==='Current month budget hours');
   const remainingField=task.custom_fields?.find(v=>String(v.name).trim().toLowerCase()==='hours remaining');
   const progressField=task.custom_fields?.find(v=>fieldName(v.name)==='Budget remaining');
@@ -86,7 +90,7 @@ export function contract(task,workspace,dateTimezone) {
   const thresholds=String(f['Alert thresholds'] ?? '80,100').split(',').map(Number);
   if(!thresholds.length || thresholds.some(n=>!Number.isFinite(n)||n<=0)) fail('Invalid thresholds');
   const allow=f['List allowlist']?String(f['List allowlist']).split(/[\s,]+/).filter(Boolean).map(v=>link(v,'list',workspace)):null;
-  return {id:String(task.id),name:task.name,folder:link(f['Client Folder'],'folder',workspace),start,end,from,zone,opening,allowance,monthly,budgetField,remainingField,progressField,thresholds:[...new Set(thresholds)].sort((a,b)=>a-b),allow};
+  return {id:String(task.id),name:task.name,folder:link(f['Client Folder'],'folder',workspace),start,end,from,zone,opening,allowance,overallAllowance,monthly,budgetField,remainingField,progressField,thresholds:[...new Set(thresholds)].sort((a,b)=>a-b),allow};
 }
 export async function scope(api,c) {
   const root=await api.folder(c.folder), folders=[];
@@ -158,7 +162,9 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       const used=month ? month.used : c.opening+ms/3600000;
       const remainingValue=Number((c.allowance-used).toFixed(2));
       const updateRemaining=c.remainingField && (c.remainingField.value===undefined || c.remainingField.value===null || c.remainingField.value==='' || Number(c.remainingField.value)!==remainingValue);
-      const budgetRemainingPercent=Number((c.allowance>0 ? Math.max(0,Math.min(1,(c.allowance-used)/c.allowance))*100 : 0).toFixed(2));
+      const overallUsed=c.opening+ms/3600000;
+      const overallRemaining=c.overallAllowance-overallUsed;
+      const budgetRemainingPercent=Number((Math.max(0,Math.min(1,overallRemaining/c.overallAllowance))*100).toFixed(2));
       let progressValue, updateProgress=false;
       if(c.progressField) {
         const {start,end}=c.progressField.type_config;
@@ -178,7 +184,7 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       // Complete every read and validate before publishing anything.
       const comments=comment?await api.comments(c.id):[];
       const already=marker && comments.some(v=>String(v.comment_text ?? v.text ?? v.comment?.map(p=>p.text).join('') ?? '').includes(marker));
-      const progressPreview=c.progressField ? {budgetRemainingPercent,proposedProgressUpdate:updateProgress ? {fieldId:c.progressField.id,value:{current:progressValue}} : null} : {};
+      const progressPreview=c.progressField ? {overallAllowance:c.overallAllowance,overallUsed,overallRemaining,budgetRemainingPercent,proposedProgressUpdate:updateProgress ? {fieldId:c.progressField.id,value:{current:progressValue}} : null} : {};
       results.push({id:c.id,name:c.name,enabled,...progressPreview,lists:lists.map(l=>({id:l.id,name:l.name})),timezone:c.zone,start:new Date(c.start).toISOString(),endExclusive:new Date(c.end).toISOString(),countFrom:new Date(c.from).toISOString(),...(month ? {monthly:month} : {}),openingHours:c.opening,clickUpHours:ms/3600000,used,remaining:c.allowance-used,firstRunReached:previous?[]:reached,proposedComment:already?null:comment});
       if(!dryRun) {
         if(proposed!==description) await api.update(c.id,proposed);
