@@ -43,6 +43,8 @@ export class ClickUp {
     }
   }
   task(id) { return this.request(`task/${id}`, {include_markdown_description:true}); }
+  list(id) { return this.request(`list/${id}`); }
+  setStatus(id, status) { return this.request(`task/${id}`,{},'PUT',{status}); }
   view(id) { return this.request(`view/${id}`); }
   async members(workspace) {
     const {teams} = await this.request('team');
@@ -92,5 +94,8 @@ export class ClickUp {
   }
   update(id, description) { return this.request(`task/${id}`,{},'PUT',{markdown_description:description}); }
   setField(id, field, value) { return this.request(`task/${id}/field/${field}`,{},'POST',{value}); }
+  clearField(id, field) { return this.request(`task/${id}/field/${field}`,{},'DELETE'); }
+  createTask(list, body) { return this.request(`list/${list}/task`,{},'POST',body); }
+  setFollowers(id, users) { return this.request(`task/${id}`,{},'PUT',{watchers:{add:users}}); }
   comment(id, text) { return this.request(`task/${id}/comment`,{},'POST',{comment_text:text,notify_all:true}); }
 }

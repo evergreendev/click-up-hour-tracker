@@ -26,3 +26,20 @@ test('time queries batch all staff into contiguous 30-day ranges',async()=>{
  assert.equal(calls[0].start_date,0);assert.equal(calls.at(-1).end_date,365*day-1);
  for(let i=1;i<calls.length;i++)assert.equal(calls[i].start_date,calls[i-1].end_date+1);
 });
+
+test('renewal adapters use official task endpoints and preserve the write guard',async()=>{
+ const api=new ClickUp('mock');
+ await assert.rejects(api.createTask('list',{name:'Renewal'}),/disabled/);
+ await assert.rejects(api.setFollowers('task',[1,2]),/disabled/);
+ await assert.rejects(api.clearField('task','opening'),/disabled/);
+ api.request=async(...args)=>args;
+ assert.deepEqual(await api.createTask('list',{name:'Renewal'}),['list/list/task',{},'POST',{name:'Renewal'}]);
+ assert.deepEqual(await api.setFollowers('task',[1,2]),['task/task',{},'PUT',{watchers:{add:[1,2]}}]);
+ assert.deepEqual(await api.clearField('task','opening'),['task/task/field/opening',{},'DELETE']);
+});
+
+test('status adapter updates task status and respects disabled writes',async()=>{
+ const api=new ClickUp('mock');await assert.rejects(api.setStatus('t','ACTIVE'),/disabled/);
+ api.request=async(...args)=>args;
+ assert.deepEqual(await api.setStatus('t','ACTIVE'),['task/t',{},'PUT',{status:'ACTIVE'}]);
+});

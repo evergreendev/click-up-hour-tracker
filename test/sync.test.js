@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {sync,midnight,contract,balance} from '../src/sync.js';
 import {ClickUp} from '../src/api.js';
 function task(id='uwbh', extra={}) {
-  return {id,name:'UWBH',markdown_description:'Human notes',custom_fields:Object.entries({Enabled:true,'Client Folder':'https://app.clickup.com/1/v/f/10','Contract start':'2026-01-01','Contract end':'2026-12-31','Hours allowance':200,...extra}).map(([name,value])=>({name,value}))};
+  return {id,name:'UWBH',status:{status:'ACTIVE'},markdown_description:'Human notes',custom_fields:Object.entries({Enabled:true,'Client Folder':'https://app.clickup.com/1/v/f/10','Contract start':'2026-01-01','Contract end':'2026-12-31','Hours allowance':200,...extra}).map(([name,value])=>({name,value}))};
 }
 function fixture() {
   const tasks=[task()], writes=[],comments=[];
@@ -80,7 +80,7 @@ function monthlyFixture() {
 const entry=(id,date,hours)=>({id,start:midnight(date,'America/Denver'),duration:hours*3600000});
 test('monthly budget carries unused hours and overages, recalculates and does not compound',async()=>{
  const f=monthlyFixture();f.entries([entry('jan','2026-01-15',15),entry('feb','2026-02-05',3)]);
- let [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,25);assert.equal(r.used,3);assert.equal(r.remaining,22);
+ let [r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,25);assert.equal(r.used,3);assert.equal(r.remaining,182);assert.equal(r.monthly.remaining,22);
  const writes=f.writes.length;await f.month('2026-02-10');assert.equal(f.writes.length,writes);
  f.entries([entry('jan','2026-01-15',25)]);[r]=await f.month('2026-02-10');assert.equal(r.monthly.allowance,15);
  [r]=await f.month('2026-04-10');assert.equal(r.monthly.allowance,55);
@@ -116,25 +116,25 @@ test('monthly sync accepts ClickUp Date fields and preserves carryover calculati
  assert.equal(r.error,undefined);
  assert.equal(r.monthly.allowance,25);
  assert.equal(r.used,3);
- assert.equal(r.remaining,22);
+ assert.equal(r.remaining,182);assert.equal(r.monthly.remaining,22);
  assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='budget').value,25);
 });
 
-test('dry run previews all tasks regardless of Enabled; apply still skips disabled tasks',async()=>{
- const f=fixture();f.tasks[0]=task('uwbh',{Enabled:false});
+test('dry run previews all statuses; apply syncs only ACTIVE regardless of Enabled',async()=>{
+ const f=fixture();f.tasks[0]=task('uwbh',{Enabled:true});f.tasks[0].status={status:'DRAFT'};
  f.tasks.push(task('second'));
  const results=await f.run({dryRun:true});
  assert.equal(results.length,2);
- assert.equal(results[0].enabled,false);assert.equal(results[0].used,0);
- assert.equal(results[1].enabled,true);assert.equal(results[1].used,0);
+ assert.equal(results[0].active,false);assert.equal(results[0].used,0);
+ assert.equal(results[1].active,true);assert.equal(results[1].used,0);
  f.tasks.pop();
  let [r]=await f.run({dryRun:true});
  assert.equal(r.skipped,undefined);assert.equal(r.used,0);
  [r]=await f.run({dryRun:true,taskId:'uwbh'});assert.equal(r.used,0);
- [r]=await f.run();assert.equal(r.skipped,true);assert.match(r.reason,/unchecked/);
+ [r]=await f.run();assert.equal(r.skipped,true);assert.match(r.reason,/not ACTIVE/);
  f.tasks[0].custom_fields=f.tasks[0].custom_fields.filter(v=>v.name!=='Enabled');
- [r]=await f.run({dryRun:true});assert.equal(r.used,0);assert.equal(r.enabled,false);
- [r]=await f.run();assert.match(r.reason,/Missing custom field/);
+ [r]=await f.run({dryRun:true});assert.equal(r.used,0);assert.equal(r.active,false);
+ [r]=await f.run();assert.match(r.reason,/not ACTIVE/);
  f.tasks.length=0;
  [r]=await f.run({dryRun:true});assert.match(r.reason,/No tasks found/);
  assert.equal(f.writes.length,0);assert.deepEqual(f.state,{});
@@ -177,12 +177,13 @@ test('Hours remaining field updates fixed budget, overage and corrections withou
  f.hours(100);await f.run();assert.equal(updates.at(-1),100);
  f.broken(true);await f.run();assert.equal(updates.length,3);
 });
-test('Hours remaining uses adjusted monthly budget; invalid field blocks all publishing',async()=>{
+test('Hours remaining uses full contract balance while current month budget excludes future months',async()=>{
  const f=monthlyFixture();
  f.tasks[0].custom_fields.push({id:'remaining',name:'Hours remaining',type:'number'});
  f.entries([entry('jan','2026-01-15',15),entry('feb','2026-02-05',3)]);
  await f.month('2026-02-10');
- assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='remaining').value,22);
+ assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='remaining').value,182);
+ assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='budget').value,25);
  const g=fixture();g.tasks[0].custom_fields.push({id:'remaining',name:'Hours remaining',type:'text'});
  const [r]=await g.run();assert.match(r.error,/must be a Number/);assert.equal(g.writes.length,0);assert.deepEqual(g.state,{});
 });
@@ -240,4 +241,39 @@ test('overall progress does not reset each month and includes reconciled opening
  const g=progressFixture(monthlyFixture());
  g.tasks[0].custom_fields=g.tasks[0].custom_fields.filter(v=>v.name!=='Hours allowance');
  [r]=await g.month('2026-02-10');assert.equal(r.overallAllowance,240);assert.equal(r.budgetRemainingPercent,100);
+});
+
+test('cutover month deducts cumulative AdOrbit usage from budget rather than current-month work',async()=>{
+ const f=progressFixture(monthlyFixture());
+ f.tasks[0].custom_fields.find(v=>v.name==='Monthly budget hours').value=28;
+ f.tasks[0].custom_fields.find(v=>v.name==='Hours allowance').value=336;
+ f.tasks[0].custom_fields.push({name:'AdOrbit opening hours',value:180.5},{name:'Cutover date',value:'2026-11-20'});
+ f.entries([entry('before','2026-11-19',50),entry('nov','2026-11-21',2)]);
+ let [r]=await f.run({dryRun:true,now:()=> '2026-11-22T12:00:00Z'});
+ assert.equal(r.monthly.carryover,99.5);assert.equal(r.monthly.allowance,127.5);
+ assert.equal(r.used,2);assert.equal(r.remaining,153.5);assert.equal(r.monthly.remaining,125.5);assert.equal(r.overallUsed,182.5);
+ assert.equal(f.updates.length,0);assert.deepEqual(f.state,{});
+ [r]=await f.month('2026-11-22');
+ assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='budget').value,127.5);
+ assert.equal(f.tasks[0].custom_fields.find(v=>v.id==='remaining').value,153.5);
+ const count=f.updates.length;await f.month('2026-11-22');assert.equal(f.updates.length,count);
+ [r]=await f.month('2026-12-02');assert.equal(r.monthly.allowance,153.5);assert.equal(r.used,0);assert.equal(r.overallUsed,182.5);
+});
+test('opening hours do not trigger cutover-month usage alerts; post-cutover work does',async()=>{
+ const f=monthlyFixture();
+ f.tasks[0].custom_fields.push({name:'AdOrbit opening hours',value:35},{name:'Cutover date',value:'2026-02-01'});
+ let [r]=await f.month('2026-02-01');
+ assert.equal(r.monthly.allowance,5);assert.equal(r.used,0);assert.deepEqual(r.firstRunReached,[]);
+ f.entries([entry('feb','2026-02-02',4)]);
+ [r]=await f.month('2026-02-03');assert.equal(r.used,4);assert.equal(f.comments.length,1);
+ assert.match(f.comments[0].comment_text,/80%/);
+});
+
+test('ACTIVE status works without Enabled and ignores a leftover unchecked Enabled checkbox',async()=>{
+ const f=fixture();f.tasks[0]=task('uwbh',{Enabled:false});f.tasks[0].status={status:' active '};
+ let [r]=await f.run();assert.equal(r.active,true);assert.equal(r.used,0);assert.equal(r.error,undefined);assert.equal(f.writes.length,1);
+ f.tasks[0].custom_fields=f.tasks[0].custom_fields.filter(v=>v.name!=='Enabled');f.hours(10);
+ [r]=await f.run();assert.equal(r.active,true);assert.equal(r.used,10);assert.equal(f.writes.length,2);
+ f.tasks[0].status={status:'CLOSED'};f.hours(20);[r]=await f.run();assert.equal(r.skipped,true);assert.equal(f.writes.length,2);assert.equal(f.state.uwbh.used,10);
+ delete f.tasks[0].status;[r]=await f.run();assert.equal(r.skipped,true);assert.equal(f.writes.length,2);
 });

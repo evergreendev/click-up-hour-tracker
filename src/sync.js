@@ -1,7 +1,8 @@
 import {createHash} from 'node:crypto';
+import {renewContract} from './renewal.js';
 const BEGIN='<!-- retainer-balance:start -->', END='<!-- retainer-balance:end -->';
 const fail = message => { throw Error(message); };
-const FIELD_NAMES=['Enabled','Client Folder','Contract start','Contract end','Hours allowance','Monthly budget hours','Current month budget hours','Hours remaining','Budget remaining','Timezone','Alert thresholds','List allowlist','AdOrbit opening hours','Cutover date'];
+const FIELD_NAMES=['Enabled','Auto-renew','Client Folder','Contract start','Contract end','Hours allowance','Monthly budget hours','Current month budget hours','Hours remaining','Budget remaining','Timezone','Alert thresholds','List allowlist','AdOrbit opening hours','Cutover date'];
 const fieldName=name=>FIELD_NAMES.find(n=>n.toLowerCase()===String(name).trim().toLowerCase()) ?? String(name).trim();
 export function fields(task) {
   const f={};
@@ -123,8 +124,10 @@ export function monthlyBalance(c, entries, instant) {
   // Use formatted parts instead of locale-dependent date parsing.
   const startParts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:c.zone,year:'numeric',month:'2-digit'}).formatToParts(c.start).map(p=>[p.type,p.value]));
   const months=(Number(parts.year)-Number(startParts.year))*12+Number(parts.month)-Number(startParts.month);
-  let prior= c.from<monthStart ? c.opening : 0;
-  let current=c.from>=monthStart ? c.opening : 0;
+  // Opening hours are cumulative pre-cutover usage, not this month's work.
+  // Apply them to available budget, including when cutover is mid-month.
+  let prior=c.opening;
+  let current=0;
   for(const e of entries.values()) {
     const start=Number(e.start), duration=Number(e.duration);
     if(duration<0 || start<c.from || start>=Math.min(c.end,monthEnd)) continue;
@@ -132,7 +135,7 @@ export function monthlyBalance(c, entries, instant) {
     else current+=duration/3600000;
   }
   const carryover=months*c.allowance-prior;
-  return {period,baseBudget:c.allowance,carryover,allowance:c.allowance+carryover,used:current,monthStart,monthEnd};
+  return {period,baseBudget:c.allowance,carryover,allowance:c.allowance+carryover,used:current,remaining:c.allowance+carryover-current,monthStart,monthEnd};
 }
 export async function sync({api,workspace,registry,state={},save=async()=>{},dryRun=true,taskId,now=()=>new Date().toISOString()}) {
   const instant=now();
@@ -141,14 +144,17 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
   for(const item of tasks) {
     if(taskId && String(item.id)!==taskId) continue;
     try {
-      const task=await api.task(item.id), f=fields(task);
-      const enabled=[true,'true',1,'1'].includes(f.Enabled);
-      if(!enabled && !dryRun) {
-        results.push({id:String(item.id),name:task.name,skipped:true,reason:Object.hasOwn(f,'Enabled') ? 'Enabled is unchecked. Run dry-run to preview this task.' : 'Missing custom field named Enabled (Checkbox). Add it to the Client Retainers List.'});
+      const task=await api.task(item.id);
+      const active=String(task.status?.status ?? '').trim().toLowerCase()==='active';
+      if(!active && !dryRun && (!state[String(item.id)]?.renewal || state[String(item.id)].renewal.status==='complete')) {
+        results.push({id:String(item.id),name:task.name,skipped:true,reason:'Task status is not ACTIVE. Run dry-run to preview this task.'});
         continue;
       }
       const resolvedTask=await resolveFolderTask(api,task,workspace);
-      const c=contract(resolvedTask,workspace,api.dateTimezone), lists=await scope(api,c), entries=new Map();
+      const c=contract(resolvedTask,workspace,api.dateTimezone), lists=await scope(api,c);
+      const renewal=await renewContract({api,task,c,workspace,registry,tasks,state,save,dryRun,instant,midnight});
+      if(renewal) {results.push(renewal);continue;}
+      const entries=new Map();
       for(const list of lists) for(const e of await api.entries(workspace,list.id,staff,c.from,c.end)) {
         if(!e.id || !Number.isFinite(Number(e.duration)) || !Number.isFinite(Number(e.start))) fail('Malformed time entry');
         if(entries.has(String(e.id)) && JSON.stringify(entries.get(String(e.id)))!==JSON.stringify(e)) fail('Inconsistent duplicate entry; retry');
@@ -160,10 +166,10 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       const month=c.monthly ? monthlyBalance(c,entries,instant) : null;
       if(month) Object.assign(c,{allowance:month.allowance});
       const used=month ? month.used : c.opening+ms/3600000;
-      const remainingValue=Number((c.allowance-used).toFixed(2));
-      const updateRemaining=c.remainingField && (c.remainingField.value===undefined || c.remainingField.value===null || c.remainingField.value==='' || Number(c.remainingField.value)!==remainingValue);
       const overallUsed=c.opening+ms/3600000;
       const overallRemaining=c.overallAllowance-overallUsed;
+      const remainingValue=Number(overallRemaining.toFixed(2));
+      const updateRemaining=c.remainingField && (c.remainingField.value===undefined || c.remainingField.value===null || c.remainingField.value==='' || Number(c.remainingField.value)!==remainingValue);
       const budgetRemainingPercent=Number((Math.max(0,Math.min(1,overallRemaining/c.overallAllowance))*100).toFixed(2));
       let progressValue, updateProgress=false;
       if(c.progressField) {
@@ -185,7 +191,7 @@ export async function sync({api,workspace,registry,state={},save=async()=>{},dry
       const comments=comment?await api.comments(c.id):[];
       const already=marker && comments.some(v=>String(v.comment_text ?? v.text ?? v.comment?.map(p=>p.text).join('') ?? '').includes(marker));
       const progressPreview=c.progressField ? {overallAllowance:c.overallAllowance,overallUsed,overallRemaining,budgetRemainingPercent,proposedProgressUpdate:updateProgress ? {fieldId:c.progressField.id,value:{current:progressValue}} : null} : {};
-      results.push({id:c.id,name:c.name,enabled,...progressPreview,lists:lists.map(l=>({id:l.id,name:l.name})),timezone:c.zone,start:new Date(c.start).toISOString(),endExclusive:new Date(c.end).toISOString(),countFrom:new Date(c.from).toISOString(),...(month ? {monthly:month} : {}),openingHours:c.opening,clickUpHours:ms/3600000,used,remaining:c.allowance-used,firstRunReached:previous?[]:reached,proposedComment:already?null:comment});
+      results.push({id:c.id,name:c.name,status:task.status?.status,active,...progressPreview,lists:lists.map(l=>({id:l.id,name:l.name})),timezone:c.zone,start:new Date(c.start).toISOString(),endExclusive:new Date(c.end).toISOString(),countFrom:new Date(c.from).toISOString(),...(month ? {monthly:month} : {}),openingHours:c.opening,clickUpHours:ms/3600000,used,remaining:overallRemaining,firstRunReached:previous?[]:reached,proposedComment:already?null:comment});
       if(!dryRun) {
         if(proposed!==description) await api.update(c.id,proposed);
         if(month && (c.budgetField.value===undefined || Number(c.budgetField.value)!==c.allowance)) await api.setField(c.id,c.budgetField.id,c.allowance);
